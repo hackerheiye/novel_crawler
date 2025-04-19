@@ -1,7 +1,9 @@
 # 小说爬虫程序
-已测试网站如下
-网站：https://www.tvbts4.com/
-网站：https://www.biziqu.cc/
+ 已测试网站如下
+ 
+ 网站：https://www.tvbts4.com/
+ 
+ 网站：https://www.biziqu.cc/
 
 这是一个功能强大的小说爬虫程序，可以自动爬取网络小说的章节内容，并支持断点续传、并发下载等功能。（未测试其他网站）
 
