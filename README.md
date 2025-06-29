@@ -37,6 +37,7 @@
 2. 安装依赖包：
 ```bash
 pip install -r requirements.txt
+playwright install 或者playwright install chromium
 ```
 
 ## 使用方法
