@@ -1,4 +1,4 @@
-crawl4ai>=1.0.0
+crawl4ai>=0.6.3
 psutil>=5.9.0
 asyncio>=3.4.3
 argparse>=1.4.0 
