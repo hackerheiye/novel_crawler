@@ -7,6 +7,7 @@ import random
 import argparse
 import time
 import psutil
+from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 from datetime import datetime
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
@@ -109,6 +110,38 @@ def clean_content(content):
     
     # 去除其他HTML标签
     content = re.sub(r'<[^>]+>', '', content)
+    
+    # 广告清理
+    ad_patterns = [
+        r'新书推荐：.*',
+        r'请记住本[站书].*?。',
+        r'[一此本][书站]首发',
+        r'天才一秒记住.*?。',
+        r'热门推荐.*',
+        r'\(https?://[^)]+\)',
+        r'手机用户请浏览.*',
+        r'txt下载.*',
+        r'本章未完.*',
+        r'未完待续.*',
+        r'（.*?未完.*?）',
+        r'（.*?请到.*?）',
+        r'（.*?记住网址.*?）',
+        r'请到.*?阅读',
+        r'本书来自.*',
+        r'本作品来自.*',
+        r'本小说.*?更新最快',
+        r'喜欢本书请收藏.*',
+        r'章节报错.*',
+        r'加入书架.*',
+        r'求收藏.*',
+        r'求月票.*',
+        r'感谢.*?打赏',
+        r'【.*?】',
+        r'\[.*?\]',
+        r'\s*\n{2,}',
+    ]
+    for pat in ad_patterns:
+        content = re.sub(pat, '', content, flags=re.MULTILINE)
     
     # 处理连续空行
     content = re.sub(r'\n{3,}', '\n\n', content)
@@ -299,18 +332,17 @@ def process_and_sort_chapters(chapters):
         title = chapter.get("title", "").strip()
         url = chapter.get("url", "")
         
-        # 第二步: 从标题提取章节号
-        chapter_num = extract_chapter_number(title)
-        
-        # 第三步: 如果没有章节号，尝试从URL中提取
+        # 第二步: 从URL中提取数字（优先）
         url_num = None
-        if chapter_num is None:
-            url_match = re.search(r'/(\d+)\.html$', url)
-            if url_match:
-                try:
-                    url_num = int(url_match.group(1))
-                except ValueError:
-                    url_num = None
+        url_match = re.search(r'/(\d+)\.html$', url)
+        if url_match:
+            try:
+                url_num = int(url_match.group(1))
+            except ValueError:
+                url_num = None
+        
+        # 第三步: 从标题提取章节号（次要）
+        chapter_num = extract_chapter_number(title)
         
         # 记录章节号统计
         if chapter_num is not None:
@@ -321,31 +353,31 @@ def process_and_sort_chapters(chapters):
         sequence = 0
         if "序" in title or "前言" in title or "楔子" in title or "简介" in title:
             sequence = 0  # 序言放在最前面
-        elif chapter_num == 1 or "第一章" in title:
+        elif url_num == 1 or chapter_num == 1 or "第一章" in title:
             sequence = 1
-        elif chapter_num == 2 or "第二章" in title:
+        elif url_num == 2 or chapter_num == 2 or "第二章" in title:
             sequence = 2
-        elif chapter_num == 3 or "第三章" in title:
+        elif url_num == 3 or chapter_num == 3 or "第三章" in title:
             sequence = 3
         
         # 第五步: 计算优先级
         priority = 0
         
-        # 特殊章节优先级
-        if "第一章" in title or (chapter_num == 1 and "章" in title):
+        # 特殊章节优先级 - 优先URL数字
+        if url_num == 1 or ("第一章" in title and url_num is None):
             priority = 1000
-        elif "第二章" in title or (chapter_num == 2 and "章" in title):
+        elif url_num == 2 or ("第二章" in title and url_num is None):
             priority = 900
-        elif "第三章" in title or (chapter_num == 3 and "章" in title):
+        elif url_num == 3 or ("第三章" in title and url_num is None):
             priority = 800
-        elif chapter_num and chapter_num < 10 and "章" in title:
-            priority = 700 - chapter_num  # 优先较小章节号
+        elif url_num and url_num < 10:
+            priority = 700 - url_num  # 优先较小URL号
         elif "序" in title or "前言" in title or "楔子" in title or "简介" in title:
             priority = 500  # 序言等特殊章节
+        elif url_num and url_num < 100:
+            priority = 400 - url_num  # 较低优先级
         elif chapter_num and chapter_num < 100:
-            priority = 400 - chapter_num  # 较低优先级
-        elif url_num and url_num < 1000000:  # URL可能有意义的数字
-            priority = 100 - (url_num % 100)  # 使用URL模100来给一个中等优先级
+            priority = 300 - chapter_num  # 标题章节号优先级更低
         else:
             priority = 0  # 默认优先级
         
@@ -381,37 +413,27 @@ def process_and_sort_chapters(chapters):
     
     logger.debug(f"是否有连续章节号序列: {has_sequential_chapters}")
     
-    # 根据是否有连续章节号选择排序策略
-    if has_sequential_chapters:
-        # 策略1: 章节序列明确，优先按章节号排序
-        logger.debug("使用章节号排序策略")
-        chapters_with_info.sort(key=lambda x: (
-            x["chapter_num"] if x["chapter_num"] is not None else 999999,  # 有章节号的优先，小的在前面
-            -x["priority"],  # 然后按优先级（高的优先）
-            x["sequence"],   # 然后按序列号（序言在前）
-            x["original_index"]  # 最后保持原顺序
-        ))
-    else:
-        # 策略2: 章节序列不明确，按优先级和URL编号排序
-        logger.debug("使用优先级和URL排序策略")
-        chapters_with_info.sort(key=lambda x: (
-            -x["priority"],  # 优先按优先级（高的优先）
-            x["url_num"] if x["url_num"] is not None else 999999,  # 然后按URL编号（小的在前面）
-            x["sequence"],   # 然后按序列号
-            x["original_index"]  # 最后保持原顺序
-        ))
+    # 优先按URL数字排序，确保第1章在最前面
+    logger.debug("使用URL数字优先排序策略")
+    chapters_with_info.sort(key=lambda x: (
+        x["url_num"] if x["url_num"] is not None else 999999,  # 优先按URL数字排序（小的在前面）
+        x["chapter_num"] if x["chapter_num"] is not None else 999999,  # 然后按章节号排序
+        -x["priority"],  # 然后按优先级（高的优先）
+        x["sequence"],   # 然后按序列号（序言在前）
+        x["original_index"]  # 最后保持原顺序
+    ))
     
     # 记录排序结果的前几章和最后几章
     logger.debug("排序结果:")
     for i in range(min(5, len(chapters_with_info))):
         chapter = chapters_with_info[i]
-        logger.debug(f"{i+1}. {chapter['title']} - 章节号:{chapter['chapter_num']}, URL号:{chapter['url_num']}, 优先级:{chapter['priority']}")
+        logger.debug(f"{i+1}. {chapter['title']} - URL号:{chapter['url_num']}, 章节号:{chapter['chapter_num']}, 优先级:{chapter['priority']}")
     
     if len(chapters_with_info) > 10:
         logger.debug("...")
         for i in range(max(5, len(chapters_with_info)-3), len(chapters_with_info)):
             chapter = chapters_with_info[i]
-            logger.debug(f"{i+1}. {chapter['title']} - 章节号:{chapter['chapter_num']}, URL号:{chapter['url_num']}, 优先级:{chapter['priority']}")
+            logger.debug(f"{i+1}. {chapter['title']} - URL号:{chapter['url_num']}, 章节号:{chapter['chapter_num']}, 优先级:{chapter['priority']}")
     
     # 转换回原始格式
     return [chapter["original"] for chapter in chapters_with_info]
@@ -421,50 +443,38 @@ async def crawl_chapter(crawler, chapter_url, novel_name=None, author=None, max_
     logger.info(f"正在爬取章节: {chapter_url}")
     
     try:
-        # 获取章节页面
         result = await crawler.arun(url=chapter_url)
         html = result.html
-        
-        # 调试输出
-        logger.debug(f"获取到的章节HTML长度: {len(html)}")
-        
-        # 提取章节内容 - 尝试多种匹配模式
-        content_patterns = [
-            r'<div[^>]*id="content"[^>]*>(.*?)</div>',
-            r'<div[^>]*class="content"[^>]*>(.*?)</div>',
-            r'<div[^>]*class="chapter-content"[^>]*>(.*?)</div>',
-            r'<div[^>]*class="article-content"[^>]*>(.*?)</div>',
-            r'<article[^>]*>(.*?)</article>'
-        ]
-        
-        content = ""
-        for pattern in content_patterns:
-            content_match = re.search(pattern, html, re.DOTALL)
-            if content_match:
-                content = content_match.group(1)
-                logger.debug(f"使用模式 '{pattern}' 提取到内容，长度: {len(content)}")
-                break
-        
+        # 使用 BeautifulSoup 提取正文
+        soup = BeautifulSoup(html, 'html.parser')
+        content = ''
+        # 优先 <div id="content">
+        content_div = soup.find('div', id='content')
+        if not content_div:
+            # 其次 <div class="content">
+            content_div = soup.find('div', class_='content')
+        if content_div:
+            content = content_div.get_text(separator='\n', strip=True)
+        # fallback 到原正则
         if not content:
-            logger.warning(f"未能从 {chapter_url} 提取到内容")
+            content_patterns = [
+                r'<div[^>]*id="content"[^>]*>(.*?)</div>',
+                r'<div[^>]*class="content"[^>]*>(.*?)</div>',
+                r'<div[^>]*class="chapter-content"[^>]*>(.*?)</div>',
+                r'<div[^>]*class="article-content"[^>]*>(.*?)</div>',
+                r'<article[^>]*>(.*?)</article>'
+            ]
+            for pattern in content_patterns:
+                content_match = re.search(pattern, html, re.DOTALL)
+                if content_match:
+                    content = content_match.group(1)
+                    break
+        # 内容为空报警
+        if not content or len(content.strip()) < 20:
+            logger.warning(f"未能从 {chapter_url} 提取到有效正文内容！")
             return None
-        
-        # 清理内容中的HTML标签和广告
-        content = re.sub(r'<br\s*/?>', '\n', content)  # 保留换行
-        content = re.sub(r'<p[^>]*>(.*?)</p>', r'\1\n', content)  # 保留段落
-        
-        # 清理其它HTML标签和常见广告
-        content = re.sub(r'<script.*?</script>', '', content, flags=re.DOTALL)
-        content = re.sub(r'<.*?>', '', content)
-        content = re.sub(r'http.*?\.(com|net|org|cn)', '', content)  # 移除网站链接
-        content = re.sub(r'请记住本[站书].*?。', '', content)  # 移除广告语
-        content = re.sub(r'[一此本][书站]首发', '', content)  # 移除广告语
-        content = re.sub(r'天才一秒记住.*?。', '', content)  # 移除广告语
-        content = re.sub(r'热门推荐.*', '', content)  # 移除热门推荐
-        content = re.sub(r'\(https?://[^)]+\)', '', content)  # 移除括号中的URL
-        content = re.sub(r'手机用户请浏览.*', '', content)  # 移除手机用户提示
-        content = re.sub(r'txt下载.*', '', content)  # 移除下载提示
-        content = re.sub(r'&nbsp;', ' ', content)  # 替换HTML空格
+        # 清理广告和格式化
+        content = clean_content(content)
         
         # 提取章节标题 - 尝试多种匹配模式
         title_patterns = [
@@ -566,9 +576,6 @@ async def crawl_chapter(crawler, chapter_url, novel_name=None, author=None, max_
         category_match = re.search(r'<meta property="og:novel:category" content="([^"]+)"', html)
         if category_match:
             category = category_match.group(1)
-        
-        # 清理和格式化内容
-        content = clean_content(content)
         
         # 返回章节信息
         return {
@@ -919,6 +926,18 @@ async def crawl_index_page(crawler, url):
         logger.error(f"爬取目录页 {url} 时出错: {str(e)}", exc_info=True)
         return None
 
+def is_directory_page(url):
+    """检测URL是否为目录页"""
+    # 目录页的特征：不以 .html 结尾，或者以 / 结尾
+    if url.endswith('/') or not url.endswith('.html'):
+        return True
+    
+    # 检查URL模式，目录页通常不包含章节数字
+    if re.search(r'/\d+\.html$', url):
+        return False
+    
+    return True
+
 async def crawl_multiple_chapters(url, output_dir="novels", num_chapters=10, is_chapter=False, 
                                  pause_range=(1.0, 3.0), resume=False, logger_level="INFO",
                                  concurrency=8):
@@ -984,7 +1003,7 @@ async def crawl_multiple_chapters(url, output_dir="novels", num_chapters=10, is_
                 if novel_info:
                     total_chapters = novel_info.get('chapters', [])
                     
-                    # 确保章节是按顺序排列的，从第一章开始
+                    # 确保章节是按顺序排列的
                     total_chapters = process_and_sort_chapters(total_chapters)
                     
                     logger.info(f"将爬取 {min(num_chapters, len(total_chapters)) if num_chapters > 0 else len(total_chapters)} 个章节")
@@ -1007,6 +1026,20 @@ async def crawl_multiple_chapters(url, output_dir="novels", num_chapters=10, is_
                             
                             # 确保章节是按顺序排列的
                             total_chapters = process_and_sort_chapters(total_chapters)
+                            
+                            # 找到用户指定的章节在排序后列表中的位置
+                            start_index = 0
+                            for i, chapter in enumerate(total_chapters):
+                                if chapter.get('url') == url:
+                                    start_index = i
+                                    logger.info(f"找到指定章节在目录中的位置: 第 {start_index + 1} 个")
+                                    break
+                            
+                            # 如果找到了指定章节，只取从该位置开始到末尾的章节
+                            if start_index > 0:
+                                # 只取从指定章节开始到末尾的章节，不重新排列
+                                total_chapters = total_chapters[start_index:]
+                                logger.info(f"已截取章节列表，从指定章节开始，共 {len(total_chapters)} 章")
                     
                     # 如果没有获取到目录，或者章节列表为空，就只爬当前章节及其后续章节
                     if not total_chapters:
@@ -1034,6 +1067,14 @@ async def crawl_multiple_chapters(url, output_dir="novels", num_chapters=10, is_
                 
                 # 确定要爬取的章节数量
                 chapters_to_crawl = min(num_chapters, len(total_chapters)) if num_chapters > 0 else len(total_chapters)
+                
+                # 记录爬取范围
+                if is_chapter:
+                    logger.info(f"从指定章节开始，将爬取 {chapters_to_crawl} 个章节")
+                    if total_chapters:
+                        logger.info(f"起始章节: {total_chapters[0]['title']} ({total_chapters[0]['url']})")
+                else:
+                    logger.info(f"从第1章开始，将爬取 {chapters_to_crawl} 个章节")
                 
                 # 创建信号量来控制并发
                 semaphore = asyncio.Semaphore(concurrency)
@@ -1148,6 +1189,11 @@ async def crawl_multiple_chapters(url, output_dir="novels", num_chapters=10, is_
                         next_url = chapter_data.get('next_url')
                         if not next_url or next_url == current_url:
                             logger.info("没有找到下一章链接，爬取结束")
+                            break
+                        
+                        # 检查下一章URL是否为目录页
+                        if is_directory_page(next_url):
+                            logger.info(f"下一章链接指向目录页: {next_url}，爬取结束")
                             break
                         
                         current_url = next_url
